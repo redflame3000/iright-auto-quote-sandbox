@@ -89,10 +89,13 @@ async function pullLatestEmail() {
       source: true,
       envelope: true,
     });
-    if (!latest?.source) {
+    if (latest === false || !latest.source) {
       throw new Error("Unable to fetch latest message.");
     }
-    const parsed = await simpleParser(latest.source as Buffer);
+    const source = Buffer.isBuffer(latest.source)
+      ? latest.source
+      : Buffer.from(latest.source);
+    const parsed = await simpleParser(source);
     const from =
       parsed.from?.value?.find((v) => v.address)?.address ||
       latest.envelope?.from?.[0]?.address ||
@@ -209,14 +212,15 @@ function transformAiToDraft(ai: RawAiDraft) {
   };
 }
 
-async function resolveBrand(service: ReturnType<typeof createClient>, brandInputUpper: string) {
+async function resolveBrand(service: any, brandInputUpper: string) {
   const { data } = await service
     .from("brand_alias")
     .select("standard_brand")
     .eq("alias", brandInputUpper)
     .limit(1)
     .maybeSingle();
-  return text(data?.standard_brand, brandInputUpper).toUpperCase();
+  if (!data) return brandInputUpper;
+  return text(data.standard_brand, brandInputUpper).toUpperCase();
 }
 
 async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>) {
