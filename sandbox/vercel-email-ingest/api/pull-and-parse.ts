@@ -223,7 +223,10 @@ async function resolveBrand(service: any, brandInputUpper: string) {
   return text(data.standard_brand, brandInputUpper).toUpperCase();
 }
 
-async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>) {
+async function saveDraftToSupabase(
+  draft: ReturnType<typeof transformAiToDraft>,
+  mail: { uid: number; messageId: string; subjectNorm: string; from: string },
+) {
   const url = text(process.env.SUPABASE_URL);
   const key = text(process.env.SUPABASE_SERVICE_ROLE_KEY);
   const userId = text(process.env.SANDBOX_OWNER_USER_ID);
@@ -288,6 +291,33 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
   const { data: who, error: whoErr } = await supabaseAdmin.rpc("whoami");
   diagnostics.rpcResult = whoErr ? { error: whoErr.message } : who;
   console.log("[supabase whoami]", diagnostics.rpcResult);
+
+  const sourceMessageId = text(mail.messageId).toLowerCase();
+  if (sourceMessageId) {
+    const { data: existing } = await supabaseAdmin
+      .schema("public")
+      .from("quotations")
+      .select("id,inquiry_id")
+      .eq("user_id", userId)
+      .contains("template_meta", { source_message_id: sourceMessageId })
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (existing?.id && existing?.inquiry_id) {
+      console.log("[supabase duplicate mail skipped]", {
+        sourceMessageId,
+        inquiryId: existing.inquiry_id,
+        quotationId: existing.id,
+      });
+      return {
+        ok: true,
+        inquiryId: existing.inquiry_id,
+        quotationId: existing.id,
+        duplicated: true,
+        diagnostics,
+      };
+    }
+  }
 
   const { data: inquiry, error: inquiryErr } = await supabaseAdmin
     .schema("public")
@@ -355,6 +385,10 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
       user_id: userId,
       status: "draft",
       template_meta: {
+        source_uid: mail.uid,
+        source_message_id: sourceMessageId || null,
+        source_subject_norm: mail.subjectNorm,
+        source_from: mail.from,
         shipment_company_name: draft.delivery_company_name ?? "",
         shipment_address: draft.delivery_address ?? "",
         shipment_recipient: draft.delivery_contact_person ?? "",
@@ -403,6 +437,7 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
     ok: true,
     inquiryId: inquiry.id,
     quotationId: quotation.id,
+    duplicated: false,
     diagnostics,
   };
 }
@@ -441,7 +476,12 @@ export default async function handler(req: any, res: any) {
         }
       | null = null;
     if (save) {
-      saved = await saveDraftToSupabase(draft);
+      saved = await saveDraftToSupabase(draft, {
+        uid: mail.uid,
+        messageId: mail.messageId,
+        subjectNorm: mail.subjectNorm,
+        from: mail.from,
+      });
     }
 
     res.status(200).json({
