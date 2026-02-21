@@ -227,6 +227,53 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
   const url = text(process.env.SUPABASE_URL);
   const key = text(process.env.SUPABASE_SERVICE_ROLE_KEY);
   const userId = text(process.env.SANDBOX_OWNER_USER_ID);
+
+  const decodeJwtRole = (jwt: string): string | null => {
+    try {
+      const parts = jwt.split(".");
+      if (parts.length < 2) return null;
+      const payloadPart = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+      const padded = payloadPart.padEnd(Math.ceil(payloadPart.length / 4) * 4, "=");
+      const payload = JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as {
+        role?: unknown;
+      };
+      return typeof payload.role === "string" ? payload.role : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const supabaseHost = (() => {
+    try {
+      return new URL(url).host;
+    } catch {
+      return "";
+    }
+  })();
+  const keyPrefix = key.slice(0, 6);
+  const jwtRole = decodeJwtRole(key);
+
+  const diagnostics: {
+    supabaseHost: string;
+    keyPrefix: string;
+    jwtRole: string | null;
+    rpcResult: unknown;
+    insertError: string | null;
+  } = {
+    supabaseHost,
+    keyPrefix,
+    jwtRole,
+    rpcResult: null,
+    insertError: null,
+  };
+
+  console.log("[supabase diagnostics]", {
+    supabaseHost,
+    keyPrefix,
+    keyStartsWithEyJ: key.startsWith("eyJ"),
+    jwtRole,
+  });
+
   if (!url || !key || !userId) {
     throw new Error("Missing SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY/SANDBOX_OWNER_USER_ID");
   }
@@ -234,11 +281,16 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
     throw new Error("No valid lines to save.");
   }
 
-  const service = createClient(url, key, {
-    auth: { persistSession: false, autoRefreshToken: false },
+  const supabaseAdmin = createClient(url, key, {
+    auth: { persistSession: false },
   });
 
-  const { data: inquiry, error: inquiryErr } = await service
+  const { data: who, error: whoErr } = await supabaseAdmin.rpc("whoami");
+  diagnostics.rpcResult = whoErr ? { error: whoErr.message } : who;
+  console.log("[supabase whoami]", diagnostics.rpcResult);
+
+  const { data: inquiry, error: inquiryErr } = await supabaseAdmin
+    .schema("public")
     .from("inquiries")
     .insert({
       user_id: userId,
@@ -253,7 +305,9 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
     .select("id")
     .single();
   if (inquiryErr || !inquiry) {
-    throw new Error(`Create inquiry failed: ${inquiryErr?.message || "unknown"}`);
+    diagnostics.insertError = inquiryErr?.message || "unknown";
+    console.log("[supabase insert inquiry failed]", diagnostics);
+    return { ok: false, diagnostics };
   }
 
   const inquiryItems: Array<{
@@ -266,8 +320,9 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
   }> = [];
 
   for (const line of draft.lines) {
-    const brandStandard = await resolveBrand(service, line.brandInputUpper);
-    const { data: inquiryItem, error } = await service
+    const brandStandard = await resolveBrand(supabaseAdmin, line.brandInputUpper);
+    const { data: inquiryItem, error } = await supabaseAdmin
+      .schema("public")
       .from("inquiry_items")
       .insert({
         inquiry_id: inquiry.id,
@@ -292,7 +347,8 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
     });
   }
 
-  const { data: quotation, error: quotationErr } = await service
+  const { data: quotation, error: quotationErr } = await supabaseAdmin
+    .schema("public")
     .from("quotations")
     .insert({
       inquiry_id: inquiry.id,
@@ -313,14 +369,16 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
   }
 
   for (const item of inquiryItems) {
-    const { data: hit } = await service
+    const { data: hit } = await supabaseAdmin
+      .schema("public")
       .from("price_list")
       .select("id")
       .eq("brand", item.brandStandard)
       .eq("normalized_catalog_number", item.normalizedCatalog)
       .maybeSingle();
 
-    const { error } = await service
+    const { error } = await supabaseAdmin
+      .schema("public")
       .from("quotation_items")
       .insert({
         quotation_id: quotation.id,
@@ -340,7 +398,13 @@ async function saveDraftToSupabase(draft: ReturnType<typeof transformAiToDraft>)
     }
   }
 
-  return { inquiryId: inquiry.id, quotationId: quotation.id };
+  console.log("[supabase insert inquiry success]", diagnostics);
+  return {
+    ok: true,
+    inquiryId: inquiry.id,
+    quotationId: quotation.id,
+    diagnostics,
+  };
 }
 
 export default async function handler(req: any, res: any) {
@@ -362,7 +426,20 @@ export default async function handler(req: any, res: any) {
     });
     const draft = transformAiToDraft(ai.json);
 
-    let saved: { inquiryId: string; quotationId: string } | null = null;
+    let saved:
+      | {
+          ok: boolean;
+          inquiryId?: string;
+          quotationId?: string;
+          diagnostics: {
+            supabaseHost: string;
+            keyPrefix: string;
+            jwtRole: string | null;
+            rpcResult: unknown;
+            insertError: string | null;
+          };
+        }
+      | null = null;
     if (save) {
       saved = await saveDraftToSupabase(draft);
     }
