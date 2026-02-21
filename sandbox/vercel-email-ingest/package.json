@@ -1,0 +1,11 @@
+{
+  "name": "vercel-email-ingest-sandbox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.95.3",
+    "imapflow": "^1.0.192",
+    "mailparser": "^3.9.0"
+  }
+}

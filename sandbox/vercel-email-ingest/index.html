@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Email Ingest Sandbox</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 24px; max-width: 900px; }
+      button { padding: 8px 14px; cursor: pointer; }
+      .row { margin: 10px 0; }
+      textarea { width: 100%; height: 360px; font-family: Consolas, monospace; }
+      input[type="password"] { width: 360px; }
+      .hint { color: #555; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <h1>Email Ingest Sandbox</h1>
+    <p>Pull latest email, parse with AI, optionally save inquiry+quotation to Supabase.</p>
+
+    <div class="row">
+      <label>
+        Endpoint token (optional):
+        <input id="token" type="password" placeholder="SANDBOX_ENDPOINT_TOKEN" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        <input id="save" type="checkbox" checked />
+        Save to Supabase
+      </label>
+    </div>
+    <div class="row">
+      <button id="run">Pull & Parse Once</button>
+    </div>
+    <div class="row hint">
+      Use this only for sandbox validation. Do not expose production secrets in client code.
+    </div>
+    <div class="row">
+      <textarea id="out" readonly></textarea>
+    </div>
+
+    <script>
+      const runBtn = document.getElementById("run");
+      const out = document.getElementById("out");
+      runBtn.addEventListener("click", async () => {
+        runBtn.disabled = true;
+        out.value = "Running...";
+        try {
+          const token = document.getElementById("token").value.trim();
+          const save = document.getElementById("save").checked;
+          const resp = await fetch("/api/pull-and-parse", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...(token ? { "x-sandbox-token": token } : {})
+            },
+            body: JSON.stringify({ save })
+          });
+          const body = await resp.json();
+          out.value = JSON.stringify(body, null, 2);
+        } catch (err) {
+          out.value = String(err);
+        } finally {
+          runBtn.disabled = false;
+        }
+      });
+    </script>
+  </body>
+</html>
