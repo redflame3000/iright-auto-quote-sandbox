@@ -3,7 +3,7 @@
 Minimal sandbox to validate:
 - IMAP pull (latest email)
 - AI extraction to strict JSON
-- Optional save into existing Supabase (`inquiries`, `inquiry_items`, `quotations`, `quotation_items`)
+- Optional save into the main business data store (`inquiries`, `inquiry_items`, `quotations`, `quotation_items`)
 
 This folder is standalone and can be deployed as its own Vercel project.
 
@@ -25,9 +25,20 @@ Required:
 - `IMAP_MAILBOX` (default `INBOX`)
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL` (recommend `gpt-4o-mini`)
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `SANDBOX_OWNER_USER_ID` (the auth.users.id that owns inserted records)
+- `DATA_DB_HOST`
+- `DATA_DB_PORT`
+- `DATA_DB_DATABASE`
+- `DATA_DB_USER`
+- `DATA_DB_PASSWORD`
+- `DATA_OWNER_USER_ID` (the auth user id or external user id that owns inserted records)
+
+Compatibility fallback:
+- `MYSQL_HOST`
+- `MYSQL_PORT`
+- `MYSQL_DATABASE`
+- `MYSQL_USER`
+- `MYSQL_PASSWORD`
+- `SANDBOX_OWNER_USER_ID`
 
 Optional:
 - `SANDBOX_ENDPOINT_TOKEN` (protect `/api/pull-and-parse`; pass via `x-sandbox-token`)
@@ -36,7 +47,7 @@ Optional:
 
 - Open project URL root `/`
 - Click `Pull & Parse Once`
-- Keep `Save to Supabase` checked to persist into your main Supabase data.
+- Keep `Save to Main Data Store` checked to persist into your main business data.
 
 ## 4) Verify in Main App
 

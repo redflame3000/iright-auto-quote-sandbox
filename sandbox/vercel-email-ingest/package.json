@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@supabase/supabase-js": "^2.95.3",
     "imapflow": "^1.0.192",
-    "mailparser": "^3.9.0"
+    "mailparser": "^3.9.0",
+    "mysql2": "^3.20.0"
   }
 }

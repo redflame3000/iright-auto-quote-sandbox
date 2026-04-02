@@ -1,6 +1,18 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
-import { createClient } from "@supabase/supabase-js";
+
+import {
+  persistDraftToBusinessStore,
+  type PersistResult,
+} from "../lib/business-store.js";
+
+type ChatCompletionResponsePayload = {
+  choices?: Array<{
+    message?: {
+      content?: string | null;
+    };
+  }>;
+};
 
 type RawAiDraft = {
   customer?: {
@@ -162,7 +174,7 @@ async function aiExtract(mail: { subject: string; from: string; text: string }) 
     const body = await resp.text();
     throw new Error(`OpenAI error ${resp.status}: ${body}`);
   }
-  const payload = await resp.json();
+  const payload = (await resp.json()) as ChatCompletionResponsePayload;
   const content = text(payload?.choices?.[0]?.message?.content);
   if (!content) {
     throw new Error("OpenAI returned empty content.");
@@ -212,234 +224,11 @@ function transformAiToDraft(ai: RawAiDraft) {
   };
 }
 
-async function resolveBrand(service: any, brandInputUpper: string) {
-  const { data } = await service
-    .from("brand_alias")
-    .select("standard_brand")
-    .eq("alias", brandInputUpper)
-    .limit(1)
-    .maybeSingle();
-  if (!data) return brandInputUpper;
-  return text(data.standard_brand, brandInputUpper).toUpperCase();
-}
-
-async function saveDraftToSupabase(
+async function persistDraftToStore(
   draft: ReturnType<typeof transformAiToDraft>,
   mail: { uid: number; messageId: string; subjectNorm: string; from: string },
 ) {
-  const url = text(process.env.SUPABASE_URL);
-  const key = text(process.env.SUPABASE_SERVICE_ROLE_KEY);
-  const userId = text(process.env.SANDBOX_OWNER_USER_ID);
-
-  const decodeJwtRole = (jwt: string): string | null => {
-    try {
-      const parts = jwt.split(".");
-      if (parts.length < 2) return null;
-      const payloadPart = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-      const padded = payloadPart.padEnd(Math.ceil(payloadPart.length / 4) * 4, "=");
-      const payload = JSON.parse(Buffer.from(padded, "base64").toString("utf8")) as {
-        role?: unknown;
-      };
-      return typeof payload.role === "string" ? payload.role : null;
-    } catch {
-      return null;
-    }
-  };
-
-  const supabaseHost = (() => {
-    try {
-      return new URL(url).host;
-    } catch {
-      return "";
-    }
-  })();
-  const keyPrefix = key.slice(0, 6);
-  const jwtRole = decodeJwtRole(key);
-
-  const diagnostics: {
-    supabaseHost: string;
-    keyPrefix: string;
-    jwtRole: string | null;
-    rpcResult: unknown;
-    insertError: string | null;
-  } = {
-    supabaseHost,
-    keyPrefix,
-    jwtRole,
-    rpcResult: null,
-    insertError: null,
-  };
-
-  console.log("[supabase diagnostics]", {
-    supabaseHost,
-    keyPrefix,
-    keyStartsWithEyJ: key.startsWith("eyJ"),
-    jwtRole,
-  });
-
-  if (!url || !key || !userId) {
-    throw new Error("Missing SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY/SANDBOX_OWNER_USER_ID");
-  }
-  if (!draft.lines.length) {
-    throw new Error("No valid lines to save.");
-  }
-
-  const supabaseAdmin = createClient(url, key, {
-    auth: { persistSession: false },
-  });
-
-  const { data: who, error: whoErr } = await supabaseAdmin.rpc("whoami");
-  diagnostics.rpcResult = whoErr ? { error: whoErr.message } : who;
-  console.log("[supabase whoami]", diagnostics.rpcResult);
-
-  const sourceMessageId = text(mail.messageId).toLowerCase();
-  if (sourceMessageId) {
-    const { data: existing } = await supabaseAdmin
-      .schema("public")
-      .from("quotations")
-      .select("id,inquiry_id")
-      .eq("user_id", userId)
-      .contains("template_meta", { source_message_id: sourceMessageId })
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (existing?.id && existing?.inquiry_id) {
-      console.log("[supabase duplicate mail skipped]", {
-        sourceMessageId,
-        inquiryId: existing.inquiry_id,
-        quotationId: existing.id,
-      });
-      return {
-        ok: true,
-        inquiryId: existing.inquiry_id,
-        quotationId: existing.id,
-        duplicated: true,
-        diagnostics,
-      };
-    }
-  }
-
-  const { data: inquiry, error: inquiryErr } = await supabaseAdmin
-    .schema("public")
-    .from("inquiries")
-    .insert({
-      user_id: userId,
-      status: "draft",
-      customer_name: draft.customer_name,
-      customer_country: draft.customer_country,
-      billing_address: draft.billing_address,
-      contact_person: draft.contact_person,
-      contact_phone: draft.contact_phone,
-      contact_email: draft.contact_email,
-    })
-    .select("id")
-    .single();
-  if (inquiryErr || !inquiry) {
-    diagnostics.insertError = inquiryErr?.message || "unknown";
-    console.log("[supabase insert inquiry failed]", diagnostics);
-    return { ok: false, diagnostics };
-  }
-
-  const inquiryItems: Array<{
-    id: string;
-    brandInputUpper: string;
-    brandStandard: string;
-    catalogUpper: string;
-    normalizedCatalog: string;
-    quantity: number;
-  }> = [];
-
-  for (const line of draft.lines) {
-    const brandStandard = await resolveBrand(supabaseAdmin, line.brandInputUpper);
-    const { data: inquiryItem, error } = await supabaseAdmin
-      .schema("public")
-      .from("inquiry_items")
-      .insert({
-        inquiry_id: inquiry.id,
-        user_id: userId,
-        brand: brandStandard,
-        catalog_number: line.catalogUpper,
-        normalized_catalog_number: line.normalizedCatalog,
-        quantity: line.quantity,
-      })
-      .select("id")
-      .single();
-    if (error || !inquiryItem) {
-      throw new Error(`Create inquiry item failed: ${error?.message || "unknown"}`);
-    }
-    inquiryItems.push({
-      id: inquiryItem.id,
-      brandInputUpper: line.brandInputUpper,
-      brandStandard,
-      catalogUpper: line.catalogUpper,
-      normalizedCatalog: line.normalizedCatalog,
-      quantity: line.quantity,
-    });
-  }
-
-  const { data: quotation, error: quotationErr } = await supabaseAdmin
-    .schema("public")
-    .from("quotations")
-    .insert({
-      inquiry_id: inquiry.id,
-      user_id: userId,
-      status: "draft",
-      template_meta: {
-        source_uid: mail.uid,
-        source_message_id: sourceMessageId || null,
-        source_subject_norm: mail.subjectNorm,
-        source_from: mail.from,
-        shipment_company_name: draft.delivery_company_name ?? "",
-        shipment_address: draft.delivery_address ?? "",
-        shipment_recipient: draft.delivery_contact_person ?? "",
-        shipment_phone: draft.delivery_phone ?? "",
-        shipment_email: draft.delivery_email ?? "",
-      },
-    })
-    .select("id")
-    .single();
-  if (quotationErr || !quotation) {
-    throw new Error(`Create quotation failed: ${quotationErr?.message || "unknown"}`);
-  }
-
-  for (const item of inquiryItems) {
-    const { data: hit } = await supabaseAdmin
-      .schema("public")
-      .from("price_list")
-      .select("id")
-      .eq("brand", item.brandStandard)
-      .eq("normalized_catalog_number", item.normalizedCatalog)
-      .maybeSingle();
-
-    const { error } = await supabaseAdmin
-      .schema("public")
-      .from("quotation_items")
-      .insert({
-        quotation_id: quotation.id,
-        inquiry_item_id: item.id,
-        user_id: userId,
-        brand: item.brandStandard,
-        catalog_number: item.catalogUpper,
-        normalized_catalog_number: item.normalizedCatalog,
-        quantity: item.quantity,
-        price_list_id: hit?.id ?? null,
-        match_status: hit?.id ? "matched" : "not_found",
-        brand_input: item.brandInputUpper,
-        brand_standard: item.brandStandard,
-      });
-    if (error) {
-      throw new Error(`Create quotation item failed: ${error.message}`);
-    }
-  }
-
-  console.log("[supabase insert inquiry success]", diagnostics);
-  return {
-    ok: true,
-    inquiryId: inquiry.id,
-    quotationId: quotation.id,
-    duplicated: false,
-    diagnostics,
-  };
+  return await persistDraftToBusinessStore(draft, mail);
 }
 
 export default async function handler(req: any, res: any) {
@@ -461,22 +250,9 @@ export default async function handler(req: any, res: any) {
     });
     const draft = transformAiToDraft(ai.json);
 
-    let saved:
-      | {
-          ok: boolean;
-          inquiryId?: string;
-          quotationId?: string;
-          diagnostics: {
-            supabaseHost: string;
-            keyPrefix: string;
-            jwtRole: string | null;
-            rpcResult: unknown;
-            insertError: string | null;
-          };
-        }
-      | null = null;
+    let saved: PersistResult | null = null;
     if (save) {
-      saved = await saveDraftToSupabase(draft, {
+      saved = await persistDraftToStore(draft, {
         uid: mail.uid,
         messageId: mail.messageId,
         subjectNorm: mail.subjectNorm,
